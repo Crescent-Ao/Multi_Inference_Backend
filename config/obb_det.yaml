@@ -1,0 +1,36 @@
+# 模型配置
+model_dir: backend/weights/obb_det
+model_name: "best_ckpt"
+model_path: ""
+
+
+# 推理平台和精度
+platform: ""
+precision: ""
+
+# 图像处理参数
+img_size: 800
+stride: 32
+
+# 后处理参数
+conf_thres: 0.25
+iou_thres: 0.45
+
+
+
+# 类别名称
+names: []
+
+classes: None
+multi_label: True
+max_det: 300
+agnostic: False
+
+# 其他参数
+agnostic: false  # 假设这是 'agnos' 的完整拼写
+
+
+names: ["car", "feright car", "truck", "bus", "van"]
+
+# 注意：原 JSON 中的空行和额外的大括号已被移除
+# 如果有其他未完成的配置项，您可以在这里添加并给出适当的默认值或注释
