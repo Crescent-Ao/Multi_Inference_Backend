@@ -1,4 +1,4 @@
-# 我想继承inference_engine.py中的InferenceEngine类，并实现一个具体的模型推理类
+# -*- coding: utf-8 -*-
 
 import ipdb.stdout
 from .inference_engine import InferenceEngine
@@ -12,7 +12,8 @@ from pathlib import Path
 import pandas as pd
 import json
 from collections import namedtuple,OrderedDict
-from utils.obb_util import letterbox,plot_box_and_label,generate_colors,rescale
+from utils.obb_util import letterbox,plot_box_and_label,generate_colors,rescale,dist2bbox,generate_anchors
+
 
 
 
@@ -21,15 +22,13 @@ class ObjectDetection(InferenceEngine):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.config = config
-        self.load_model()
+        self.load_model() 
 
-    
-    
     def load_model(self):
         path = self.config.get("model_path")
-        pt,jt,onnx,opvino,trt = self._model_type(path)
-        self.fp16 = pt or jt or onnx or opvino or trt
-
+        pt,jt,onnx,opvino,trt,aclite = self._model_type(path)
+        self.fp16 = pt or jt or onnx or opvino or trt 
+        self.fp16 = False if self.config.get("precision") == "FP32" else True
         # 我想定义一个device 作为整个类的成员
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         if pt:
@@ -94,6 +93,19 @@ class ObjectDetection(InferenceEngine):
             model = ov.Core().read_model(path)
             compiled_model = ov.Core().compile_model(model, self.device)
             output_names = compiled_model.outputs
+        elif aclite:
+            from utils.acl_util import AclLiteResource
+            from acllite_model import AclLiteModel
+            from acllite_resource import _ResourceList
+
+            
+            # 由于aclite后处理分离了一部分需要单独做一部分
+            anchor_points, stride_tensor = generate_anchors(None,[8, 16, 32], device=self.device,is_eval=True)
+            acl_resource = AclLiteResource()
+            acl_resource.init()
+            model = AclLiteModel(path)
+            
+            
         else:
             raise ValueError("Invalid model format")
         
@@ -107,6 +119,7 @@ class ObjectDetection(InferenceEngine):
             ["ONNX", "onnx", ".onnx", True, True],
             ["OpenVINO", "openvino", "_openvino_model", True, False],
             ["TensorRT", "engine", ".engine", False, True],
+            ["ACLite","cann",".om",False,False]
         ]
         return pd.DataFrame(x, columns=["Format","Argument","Suffix","CPU","GPU"])
     def _model_type(self,path):
@@ -153,6 +166,15 @@ class ObjectDetection(InferenceEngine):
             if self.fp16:
                 preprocessed_data = preprocessed_data.astype(np.float16)
             y = self.model.run(self.output_names, {self.model.get_inputs()[0].name: preprocessed_data})
+        elif self.aclite:
+            import ipdb
+            ipdb.set_trace()
+            preprocessed_data = np.array(preprocessed_data)
+        
+            preds = self.model.execute([preprocessed_data,])
+            preds = torch.from_numpy(preds[0])
+            preds[:,:,:4] = dist2bbox(preds[:,:,:4], self.anchor_points,box_format='xywh')*self.stride_tensor 
+            y = preds
         else:
             raise ValueError("Invalid model format")
         if isinstance(y, (list, tuple)):
