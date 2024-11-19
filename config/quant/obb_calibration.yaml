@@ -1,0 +1,27 @@
+# 路径配置
+paths:
+  # 临时文件和日志路径
+  tmp_base: "tmp/Ascend"
+  # 最终模型输出路径
+  model_output: "weights/OD"
+
+calibration:
+  task_type: "detection"
+  batch_size: 1
+  batch_num: 20
+  calib_img_dir: "data/calibration/"
+  model_path: "weights/OD/best_ckpt.onnx"
+  platform: "Ascend"
+  precision: "INT8"
+  input_size:
+    width: 800
+    height: 800
+  skip_layers: []
+  nuq_config: null
+
+# ATC 转换配置
+atc:
+  soc_version: "Ascend310B4"
+  framework: 5
+  output_name: "yolov6_quant.om"
+
