@@ -157,12 +157,15 @@ class AscendQuantizer:
             self.validate_quantized_model(modified_model_file)
             
             # 4. 保存量化模型
-            quant_model_path = os.path.join(self.model_output_dir, 'model_quant_final.onnx')
-            amct.save_model(modified_model_file, scale_offset_record_file, quant_model_path)
-            logger.info(f"Quantized model saved to {quant_model_path}")
-            
+            # import ipd
+        
+            quant_model_base = os.path.join(self.model_output_dir, 'model_quant_final')
+            amct.save_model(modified_model_file, scale_offset_record_file, quant_model_base)
+            logger.info(f"Quantized model saved to {quant_model_base}")
+            deploy_model_path = f"{quant_model_base}_deploy_model.onnx"
+            logger.info(f"Deploy model saved to {deploy_model_path}")
             # 5. 转换为OM模型
-            if self.convert_to_om(quant_model_path):
+            if self.convert_to_om(deploy_model_path):
                 logger.info("ATC conversion completed successfully")
             else:
                 logger.error("ATC conversion failed")
