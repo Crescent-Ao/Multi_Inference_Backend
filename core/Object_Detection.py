@@ -271,3 +271,99 @@ class ObjectDetection(InferenceEngine):
         img_vis= self.visualize(det[0],img,img_src)
         img_vis = img_vis.astype(np.uint8)
         return img_vis
+    def pipeline_run(self, input_data_list, conf_thres, iou_thres):
+        """
+        流水线推理模式
+        """
+        from queue import Queue
+        from threading import Thread, Event
+        
+        # 创建有限大小的队列
+        preprocess_queue = Queue(maxsize=3)
+        inference_queue = Queue(maxsize=3)
+        result_queue = Queue()  # 新增结果队列
+        
+        # 创建停止事件
+        stop_event = Event()
+        
+        def preprocess_worker():
+            """预处理线程"""
+            try:
+                while input_data_list and not stop_event.is_set():
+                    input_data = input_data_list.pop(0)
+                    img, img_src = self.preprocess(input_data)
+                    img = img.to(self.device, non_blocking=True)
+                    preprocess_queue.put((img, img_src))
+            finally:
+                preprocess_queue.put(None)
+                    
+        def inference_worker():
+            """推理线程"""
+            try:
+                while not stop_event.is_set():
+                    data = preprocess_queue.get()
+                    if data is None:
+                        break
+                        
+                    img, img_src = data
+                    if img.device != self.device:
+                        img = img.to(self.device, non_blocking=True)
+                    with torch.cuda.amp.autocast(enabled=self.fp16):
+                        pred_res = self.inference(img)
+                    inference_queue.put((pred_res.cpu(), img.cpu(), img_src))
+                    preprocess_queue.task_done()
+            finally:
+                inference_queue.put(None)
+                    
+        def postprocess_worker():
+            """后处理线程"""
+            results = []
+            try:
+                while not stop_event.is_set():
+                    data = inference_queue.get()
+                    if data is None:
+                        break
+                        
+                    pred_res, img, img_src = data
+                    det = self.postprocess(pred_res.to(self.device), conf_thres, iou_thres)
+                    img_vis = self.visualize(det[0], img, img_src)
+                    results.append(img_vis.astype(np.uint8))
+                    inference_queue.task_done()
+                
+                # 将结果放入结果队列
+                result_queue.put(results)
+            except Exception as e:
+                print(f"后处理错误: {e}")
+                stop_event.set()
+                result_queue.put([])  # 发生错误时返回空列表
+                
+        try:
+            # 创建线程
+            threads = []
+            preprocess_thread = Thread(target=preprocess_worker)
+            inference_thread = Thread(target=inference_worker)
+            postprocess_thread = Thread(target=postprocess_worker)
+            
+            threads.extend([preprocess_thread, inference_thread, postprocess_thread])
+            
+            # 启动所有线程
+            for t in threads:
+                t.start()
+                
+            # 等待所有线程完成
+            for t in threads:
+                t.join()
+                
+            # 从结果队列获取结果
+            results = result_queue.get()
+            return results
+                
+        except Exception as e:
+                print(f"Pipeline error: {e}")
+                stop_event.set()
+                raise
+        finally:
+            stop_event.set()
+    def run_batch(self, input_data_list, conf_thres, iou_thres):
+        """批处理入口函数"""
+        return self.pipeline_run(input_data_list, conf_thres, iou_thres)
