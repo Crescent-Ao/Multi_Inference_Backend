@@ -34,13 +34,7 @@ class TrtQuantizer:
         self.setup_paths()
         if self.need_calibration():
             self.calibrator = Calibrator(
-                batch_size=self.config['calibration']['batch_size'],
-                num_batches=self.config['calibration']['batch_num'],
-                img_dir=self.config['calibration']['calib_img_dir'],
-                img_size=[
-                    self.config['calibration']['input_size']['height'],
-                    self.config['calibration']['input_size']['width']
-                ]
+               config_path=config_path
             )
 
     def setup_logger(self):
@@ -119,7 +113,8 @@ class TrtQuantizer:
                     self.tmp_dir, 
                     f"{Path(model_path).stem}_calibration.cache"
                 )
-                config.int8_calibrator = self.calibrator
+                from calibrator import TensorRTCalibrator,
+                config.int8_calibrator = TensorRTCalibrator(self.calibrator,calib_cache)
                 logger.info('Int8 calibration is enabled.')
 
         # 构建引擎
@@ -204,6 +199,8 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
 
 
 
