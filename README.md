@@ -7,7 +7,7 @@
 
 # Introduction
 Multi-Task-Backend Inference Deployment Framework (MTBIDF) is a framework for deploying multi-task inference models on the backend.
-
+This framework is designed to be a one-stop solution for multi-task inference deployment, including model inference, quantization, and frontend deployment. 
 # Features
 - Support for multiple tasks, including object detection, Segmentation, and classification.
 - Support for multiple platforms, including Ascend, TensorRT, and OpenVINO.
@@ -85,6 +85,19 @@ You can use the following code to quantize the model:
 python quant/Ascend_quant.py --config_path config/quant/obb_calibration.yaml --verbose
 ```
 for calibration process, you can register your own process function in the quant/preprocess.py.
+
+# Inference Fronted
+
+![dashboard](assets/76e921e5-f8a5-4586-8e6f-ff4ceeab5e25.webp)
+dashboard page
+![frontend](assets/FCDBA08A-E354-4A64-A0E3-04173BC959B5.png)
+Inference page
+We has made a simple frontend for the inference deployment framework. You can use the following code to run the frontend:
+
+```shell
+npm run dev
+
+```
 
 # Roadmap
 - [ ] Support for Segmentation.
