@@ -1,0 +1,24 @@
+# 路径配置
+paths:
+  # 临时文件和日志路径
+  tmp_base: "tmp/TensorRT"
+  # 最终模型输出路径
+  model_output: "weights/OD"
+
+calibration:
+  task_type: "detection"
+  batch_size: 1
+  batch_num: 50
+  calib_img_dir: "/data/deploy"
+  model_path: "/code/deploy_weights_drone/best_ckpt_infer.onnx"
+  platform: "TensorRT"
+  precision: "FP32"
+  qat: false
+  max_workspace_size: 4
+  input_size:
+    width: 800
+    height: 800
+  skip_layers: []
+
+
+
