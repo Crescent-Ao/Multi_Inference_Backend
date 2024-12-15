@@ -88,7 +88,7 @@ for calibration process, you can register your own process function in the quant
 
 # Inference Fronted
 
-![dashboard](assets/76e921e5-f8a5-4586-8e6f-ff4ceeab5e25.webp)
+![dashboard](assets/image.png)
 dashboard page
 ![frontend](assets/FCDBA08A-E354-4A64-A0E3-04173BC959B5.png)
 Inference page
