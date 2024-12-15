@@ -13,7 +13,7 @@ import pandas as pd
 import json
 from collections import namedtuple,OrderedDict
 from utils.obb_util import letterbox,plot_box_and_label,generate_colors,rescale,dist2bbox,generate_anchors
-
+from loguru import logger
 
 
 
@@ -54,11 +54,10 @@ class ObjectDetection(InferenceEngine):
                 )
         elif onnx:
             import onnxruntime
-            providers = ['CPUExecutionProvider']
-            if self.device.type == "cuda":
-                providers.append('CUDAExecutionProvider')
+            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if self.device.type == "cuda" else ["CPUExecutionProvider"]
             model = onnxruntime.InferenceSession(path,providers=providers)
             output_names = [output.name for output in model.get_outputs()]
+            print("onnx model loaded successfully")
         elif trt:
             import tensorrt as trt
             if self.device == "cpu":
@@ -146,8 +145,11 @@ class ObjectDetection(InferenceEngine):
                 
             y = self.model(preprocessed_data)
         elif self.onnx:
+            preprocessed_data = preprocessed_data.cpu().numpy()
             if self.fp16:
                 preprocessed_data = preprocessed_data.astype(np.float16)
+            import ipdb
+            ipdb.set_trace()
             y = self.model.run(self.output_names, {self.model.get_inputs()[0].name: preprocessed_data})
         elif self.trt:
             if self.dynamic and preprocessed_data.shape != self.bindings["images"].shape:
@@ -204,6 +206,8 @@ class ObjectDetection(InferenceEngine):
             x[:, 6:] *= x[:, 5:6]
             box = x[:, :4]
             angle = x[:, 4:5].clone()
+            import ipdb
+            ipdb.set_trace()
             if multi_label:
                 box_idx, class_idx = (x[:, 6:] > conf_thres).nonzero(as_tuple=False).T
                 x = torch.cat((box[box_idx], angle[box_idx], x[box_idx, class_idx + 6, None], class_idx[:, None].float()), 1)
@@ -247,6 +251,8 @@ class ObjectDetection(InferenceEngine):
     def visualize(self,det,img,img_src):
         img_ori = img_src.copy()
         names = self.config["names"]
+        import ipdb
+        ipdb.set_trace()
         if len(det):
             det[:, :4] = rescale(img.shape[2:], det[:, :4], img_src.shape).round()
             for *obb, conf, cls in reversed(det):
