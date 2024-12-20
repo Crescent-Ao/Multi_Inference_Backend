@@ -9,7 +9,7 @@ platform: ""
 precision: ""
 
 # 图像处理参数
-img_size: 800
+img_size: [800,800]
 stride: 32
 
 # 后处理参数
@@ -34,3 +34,10 @@ names: ["car", "feright car", "truck", "bus", "van"]
 
 # 注意：原 JSON 中的空行和额外的大括号已被移除
 # 如果有其他未完成的配置项，您可以在这里添加并给出适当的默认值或注释
+onnx_export:
+  batch_size: 1
+  dynamic_batch: False
+  simplify: True
+  input_names: ["images"]
+  output_names: ["outputs"]
+  opset_version: 13

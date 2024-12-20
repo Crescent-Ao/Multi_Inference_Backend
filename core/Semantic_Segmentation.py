@@ -8,13 +8,73 @@ from pathlib import Path
 import pandas as pd
 from collections import namedtuple, OrderedDict
 from utils.seg_util import generate_segment_colors
-
+from loguru import logger
 class SemanticSegmentation(InferenceEngine):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.config = config
         self.load_model()
+        
+    def onnx_export(self) -> None:
+        if self.pt:
+            from utils.seg_util import load_checkpoint
+            import onnx
+            from io import BytesIO
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            model = load_checkpoint(self.config.get("model_path"), num_classes=self.config.get("num_classes"), map_location=device)
+            model.to(device)
+            model.eval()
+            dummy_input = torch.randn(self.config.get('onnx_export')['batch_size'], 3, self.config.get('img_size')[0], self.config.get('img_size')[1])
+            if self.config.get('precision') == "FP16":
+                dummy_input = dummy_input.half()
+                model = model.half()
+            else:
+                dummy_input = dummy_input.float()
+                model = model.float()
+            dummy_input = dummy_input.to(device)
+            dummy_out = model(dummy_input)
 
+            dynamic_axes = None
+            import ipdb
+            ipdb.set_trace()
+            if self.config.get('onnx_export')['dynamic_batch']:
+                dynamic_axes = {
+                    self.config.get('onnx_export')['input_names'][0] :{
+                        0:'batch',
+                    },}
+                output_axes = {
+                        self.config.get('onnx_export')['output_names'][0]: {0: 'batch'},
+                    }
+                dynamic_axes.update(output_axes)
+            try:
+                logger.info('\nStarting to export ONNX...')
+                import ipdb
+                ipdb.set_trace()
+                export_file = self.config.get("model_path").replace('.pt', '.onnx')
+                with BytesIO() as f:
+                    torch.onnx.export(model, dummy_input, f, verbose=False, opset_version=13,
+                              training=torch.onnx.TrainingMode.EVAL,
+                              input_names=["images"],
+                              dynamic_axes=dynamic_axes)
+                    f.seek(0)
+                    onnx_model = onnx.load(f)
+                    onnx.checker.check_model(onnx_model)
+                if self.config.get('onnx_export')['simplify']:
+                    try:
+                        import onnxsim
+                        logger.info('\nStarting to simplify ONNX...')
+                        onnx_model, check = onnxsim.simplify(onnx_model)
+                        assert check, 'assert check failed'
+                    except Exception as e:
+                        logger.info(f'Simplifier failure: {e}')
+                onnx.save(onnx_model, export_file)
+                logger.info(f'ONNX export success, saved as {export_file}')
+            except Exception as e:
+                logger.error(f'Export ONNX failed: {e}')   
+        else:
+            logger.info("The ONNX export must use pt model")
+            raise ValueError("Invalid model format")     
+     
     def load_model(self):
         path = self.config.get("model_path")
         pt, jt, onnx, opvino, trt, aclite = self._model_type(path)
@@ -153,10 +213,13 @@ class SemanticSegmentation(InferenceEngine):
             y = self.model(preprocessed_data)
             
         elif self.onnx:
+            print(preprocessed_data.shape)
+            preprocessed_data = preprocessed_data.cpu().numpy()
             if self.fp16:
                 preprocessed_data = preprocessed_data.astype(np.float16)
+            import ipdb
+            ipdb.set_trace()
             y = self.model.run(self.output_names, {self.model.get_inputs()[0].name: preprocessed_data})
-            
         elif self.trt:
             if self.dynamic and preprocessed_data.shape != self.bindings["images"].shape:
                 i = self.model.get_binding_index("images")
