@@ -78,15 +78,18 @@ class TrtQuantizer:
         # 设置TensorRT日志级别
         TRT_LOGGER = trt.Logger(trt.Logger.VERBOSE if self.config.get('verbose') else trt.Logger.INFO)
         
-        # 创建builder和network
+        # 创建builder和network (TensorRT 10.0 API)
         builder = trt.Builder(TRT_LOGGER)
-        network_flags = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+        config = builder.create_builder_config()
         
-        # 如果是QAT的INT8模型，添加显式精度标志
-        if dtype == "int8" and calib_config.get('qat', False):
-            network_flags = network_flags | (1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_PRECISION))
+        # 使用新的API设置内存池限制 (TensorRT 10.0)
+        config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, calib_config['max_workspace_size'] << 30)  # 转换为GB
         
-        network = builder.create_network(flags=network_flags)
+        # 新API中使用 profile 替代之前的 network_flags
+        profile = builder.create_optimization_profile()
+        
+        # 创建network
+        network = builder.create_network()
         parser = trt.OnnxParser(network, TRT_LOGGER)
 
         # 解析ONNX模型
@@ -96,16 +99,12 @@ class TrtQuantizer:
                     logger.error(f"ONNX parsing error: {parser.get_error(error)}")
                 raise RuntimeError("Failed to parse ONNX model")
 
-        # 配置builder
-        config = builder.create_builder_config()
-        config.max_workspace_size = calib_config['max_workspace_size'] << 30  # 转换为GB
-        
-        # 设置精度模式
+        # 设置精度模式 (TensorRT 10.0 API)
         if dtype == "fp16":
-            config.flags |= 1 << int(trt.BuilderFlag.FP16)
+            config.set_flag(trt.BuilderFlag.FP16)
         elif dtype == "int8":
-            config.flags |= 1 << int(trt.BuilderFlag.INT8)
-            config.flags |= 1 << int(trt.BuilderFlag.FP16)
+            config.set_flag(trt.BuilderFlag.INT8)
+            config.set_flag(trt.BuilderFlag.FP16)
             
             # 如果需要INT8校准
             if not calib_config.get('qat', False):
@@ -113,12 +112,12 @@ class TrtQuantizer:
                     self.tmp_dir, 
                     f"{Path(model_path).stem}_calibration.cache"
                 )
-                from calibrator import TensorRTCalibrator,
-                config.int8_calibrator = TensorRTCalibrator(self.calibrator,calib_cache)
+                from calibrator import TensorRTCalibrator
+                config.int8_calibrator = TensorRTCalibrator(self.calibrator, calib_cache)
                 logger.info('Int8 calibration is enabled.')
 
-        # 构建引擎
-        engine = builder.build_engine(network, config)
+        # 构建引擎 (TensorRT 10.0 API)
+        engine = builder.build_serialized_network(network, config)
         if engine is None:
             raise RuntimeError("Failed to build TensorRT engine")
 
@@ -138,6 +137,13 @@ class TrtQuantizer:
         except Exception as e:
             logger.error(f"Engine validation failed: {e}")
             return False
+
+    def save_engine(self, engine, engine_path):
+        """保存TensorRT引擎"""
+        logger.info(f"Saving TensorRT engine to {engine_path}")
+        with open(engine_path, 'wb') as f:
+            # TensorRT 10.0: engine 已经是序列化的数据，直接写入
+            f.write(engine)  # 移除 .serialize()
 
     def run(self):
         """执行完整的量化流程"""
@@ -160,8 +166,7 @@ class TrtQuantizer:
             )
             
             # 保存引擎
-            with open(engine_path, 'wb') as f:
-                f.write(engine.serialize())
+            self.save_engine(engine, engine_path)
             logger.info(f"Engine saved to: {engine_path}")
 
             # 验证引擎
@@ -199,6 +204,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 

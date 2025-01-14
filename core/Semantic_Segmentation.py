@@ -9,6 +9,10 @@ import pandas as pd
 from collections import namedtuple, OrderedDict
 from utils.seg_util import generate_segment_colors
 from loguru import logger
+import torch.nn.functional as F
+import re
+import tensorrt as trt
+from utils.util import *
 class SemanticSegmentation(InferenceEngine):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
@@ -33,7 +37,6 @@ class SemanticSegmentation(InferenceEngine):
                 model = model.float()
             dummy_input = dummy_input.to(device)
             dummy_out = model(dummy_input)
-
             dynamic_axes = None
             import ipdb
             ipdb.set_trace()
@@ -52,9 +55,11 @@ class SemanticSegmentation(InferenceEngine):
                 ipdb.set_trace()
                 export_file = self.config.get("model_path").replace('.pt', '.onnx')
                 with BytesIO() as f:
-                    torch.onnx.export(model, dummy_input, f, verbose=False, opset_version=13,
+                    torch.onnx.export(model, dummy_input, f, verbose=False, opset_version=18,
                               training=torch.onnx.TrainingMode.EVAL,
-                              input_names=["images"],
+                              do_constant_folding=True,
+                              input_names=self.config.get('onnx_export')["input_names"],
+                              output_names=self.config.get('onnx_export')["output_names"],
                               dynamic_axes=dynamic_axes)
                     f.seek(0)
                     onnx_model = onnx.load(f)
@@ -73,15 +78,41 @@ class SemanticSegmentation(InferenceEngine):
                 logger.error(f'Export ONNX failed: {e}')   
         else:
             logger.info("The ONNX export must use pt model")
-            raise ValueError("Invalid model format")     
-     
+            raise ValueError("Invalid model format") 
+    def allocate_buffers(self,dynamic_shapes=[]):
+        inputs = []
+        outputs = []
+        bindings = []
+
+        for binding in self.model:
+            dims = self.model.get_binding_shape(binding)
+            print(dims)
+            if dims[0] == -1:
+                assert(len(dynamic_shapes) > 0)
+                dims[0] = dynamic_shapes[0]
+            size = trt.volume(dims) * 1
+            print(dims)
+            print(size)
+            dtype = trt.nptype(self.model.get_binding_dtype(binding))
+            # Allocate host and device buffers
+            host_mem = cuda.pagelocked_empty(size, dtype)
+            device_mem = cuda.mem_alloc(host_mem.nbytes)
+            # Append the device buffer to device bindings.
+            bindings.append(int(device_mem))
+            # Append to the appropriate list.
+            if self.model.binding_is_input(binding):
+                inputs.append(HostDeviceMem(host_mem, device_mem))
+            else:
+                outputs.append(HostDeviceMem(host_mem, device_mem))
+        return inputs, outputs,bindings
+
     def load_model(self):
         path = self.config.get("model_path")
         pt, jt, onnx, opvino, trt, aclite = self._model_type(path)
         self.fp16 = pt or jt or onnx or opvino or trt 
         self.fp16 = False if self.config.get("precision") == "FP32" else True
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        import ipdb; ipdb.set_trace()
+
         if pt:
             from utils.seg_util import load_checkpoint
             model = load_checkpoint(path, num_classes=self.config.get("num_classes"), map_location=self.device)
@@ -104,35 +135,14 @@ class SemanticSegmentation(InferenceEngine):
             output_names = [output.name for output in model.get_outputs()]
             
         elif trt:
-            import tensorrt as trt
-            if self.device == "cpu":
-               self.device = torch.device("cuda:0")
-            Binding = namedtuple("Binding", ("name", "dtype", "shape", "data", "ptr"))
-            logger = trt.Logger(trt.Logger.WARNING)
-            trt.init_libnvinfer_plugins(logger, "")
-            with open(path, "rb") as f, trt.Runtime(logger) as runtime:
-                model = runtime.deserialize_cuda_engine(f.read())
-            context = model.create_execution_context()
-            bindings = OrderedDict()
-            output_names = []
-            dynamic = False
-            fp16 = False
-            for i in range(model.num_bindings):
-                name = model.get_binding_name(i)
-                dtype = trt.nptype(model.get_binding_dtype(i))
-                if model.binding_is_input(i):
-                    if -1 in tuple(model.get_binding_shape(i)):
-                        dynamic = True
-                        context.set_binding_shape(i, tuple(model.get_profile_shape(0, i)[2]))
-                    if dtype == np.float16:
-                        fp16 = True
-                else:
-                    output_names.append(name)
-                shape = tuple(context.get_binding_shape(i))
-                im = torch.from_numpy(np.empty(shape, dtype=np.dtype(dtype))).to(self.device)
-                bindings[name] = Binding(name, dtype, shape, im, int(im.data_ptr()))
-            binding_addrs = OrderedDict((n, d.ptr) for n, d in bindings.items())
+           pass
+
             
+           
+
+
+
+           
         elif opvino:
             import openvino as ov
             model = ov.Core().read_model(path)
@@ -169,33 +179,32 @@ class SemanticSegmentation(InferenceEngine):
         return types
 
     def preprocess(self, input_data: Any) -> Any:
+        """前处理: 图像预处理和标准化"""
         if isinstance(input_data, str):
             img = cv2.imread(input_data)
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         elif isinstance(input_data, np.ndarray):
-            if input_data.shape[-1] == 3:
-                img = cv2.cvtColor(input_data, cv2.COLOR_BGR2RGB)
-            else:
-                img = input_data
+            img = input_data.copy()
         else:
             img = np.array(input_data)
             
         img_src = img.copy()
         
-        # resize到指定大小
+        # Resize
         if img.shape[:2] != self.config.get("img_size"):
-            img = cv2.resize(img, self.config.get("img_size"), interpolation=cv2.INTER_LINEAR)
-            
-        # 标准化
-        mean = np.array([0.485, 0.456, 0.406])
-        std = np.array([0.229, 0.224, 0.225])
-        img = img.astype(np.float32) / 255.0
-        img = (img - mean) / std
-        #cv2.normalize(img, img, 0, 255, cv2.NORM_L2)#cv2.NORM_MINMAX
-
-        # 转换为tensor并添加batch维度
-        img = torch.from_numpy(img).permute(2, 0, 1).float()
-        img = img.unsqueeze(0)
+            img = cv2.resize(img, self.config.get("img_size")[::-1], interpolation=cv2.INTER_LINEAR)
+        
+        # Convert to float32 and BGR to RGB
+        img = img.astype(np.float32)[:, :, ::-1]
+        
+        # Normalize
+        img = img / 255.0
+        img -= np.array([0.485, 0.456, 0.406])
+        img /= np.array([0.229, 0.224, 0.225])
+        
+        # HWC to CHW
+        img = img.transpose((2, 0, 1)).copy()
+        img = torch.from_numpy(img).unsqueeze(0)
+        
         return img.to(self.device), img_src
     
     def inference(self, preprocessed_data: Any) -> Any:
@@ -206,7 +215,96 @@ class SemanticSegmentation(InferenceEngine):
             if self.device == torch.device("cpu"):
                 preprocessed_data = preprocessed_data.cpu()
             y = self.model(preprocessed_data)
+            import ipdb
+            ipdb.set_trace()
+        elif self.trt:
+           
+            import tensorrt as trt  # noqa https://developer.nvidia.com/nvidia-tensorrt-download
+            check_version(trt.__version__, ">=7.0.0", hard=True)
+            check_version(trt.__version__, "!=10.1.0", msg="https://github.com/ultralytics/ultralytics/pull/14239")
+            if self.device.type == "cpu":
+                self.device = torch.device("cuda:0")
+            Binding = namedtuple("Binding", ("name", "dtype", "shape", "data", "ptr"))
+            logger = trt.Logger(trt.Logger.INFO)
+            trt.init_libnvinfer_plugins(logger, '')
+            # Read file
+            path = self.config.get("model_path")
+            with open(path, "rb") as f, trt.Runtime(logger) as runtime:
+                model = runtime.deserialize_cuda_engine(f.read())  # read engine
+                context = model.create_execution_context()
             
+
+            bindings = OrderedDict()
+            output_names = []
+            fp16 = False  # default updated below
+            dynamic = False
+            is_trt10 = not hasattr(model, "num_bindings")
+            num = range(model.num_io_tensors) if is_trt10 else range(model.num_bindings)
+            from loguru import logger
+            for i in num:
+                if is_trt10:
+                    name = model.get_tensor_name(i)
+                    dtype = trt.nptype(model.get_tensor_dtype(name))
+                    is_input = model.get_tensor_mode(name) == trt.TensorIOMode.INPUT
+                    if is_input:
+                        if -1 in tuple(model.get_tensor_shape(name)):
+                            dynamic = True
+                            context.set_input_shape(name, tuple(model.get_tensor_profile_shape(name, 0)[1]))
+                        if dtype == np.float16:
+                            fp16 = True
+                    else:
+                        output_names.append(name)
+                    import ipdb
+                    ipdb.set_trace()
+                    shape = tuple(context.get_tensor_shape(name))
+                    logger.info(f"name: {name}, shape: {shape}")
+                else:  # TensorRT < 10.0
+                    name = model.get_binding_name(i)
+                    dtype = trt.nptype(model.get_binding_dtype(i))
+                    is_input = model.binding_is_input(i)
+                    if model.binding_is_input(i):
+                        if -1 in tuple(model.get_binding_shape(i)):  # dynamic
+                            dynamic = True
+                            context.set_binding_shape(i, tuple(model.get_profile_shape(0, i)[1]))
+                        if dtype == np.float16:
+                            fp16 = True
+                    else:
+                        output_names.append(name)
+                    shape = tuple(context.get_binding_shape(i))
+                im = torch.from_numpy(np.empty(shape, dtype=dtype)).to(self.device)
+                bindings[name] = Binding(name, dtype, shape, im, int(im.data_ptr()))
+            binding_addrs = OrderedDict((n, d.ptr) for n, d in bindings.items())
+            batch_size = bindings["images"].shape[0]  # if dynamic, this is inst
+            self.dynamic = False
+            self.context = context
+            self.model = model
+            self.bindings = bindings
+            self.output_names = output_names
+            self.binding_addrs = binding_addrs
+
+    
+            try:
+                if self.dynamic and preprocessed_data.shape != self.bindings["images"].shape:
+                    if self.is_trt10:
+                        self.context.set_input_shape("images", preprocessed_data.shape)
+                        self.bindings["images"] = self.bindings["images"]._replace(shape=preprocessed_data.shape)
+                        for name in self.output_names:
+                            self.bindings[name].data.resize_(tuple(self.context.get_tensor_shape(name)))
+                    else:
+                        i = self.model.get_binding_index("images")
+                        self.context.set_binding_shape(i, preprocessed_data.shape)
+                        self.bindings["images"] = self.bindings["images"]._replace(shape=preprocessed_data.shape)
+                        for name in self.output_names:
+                            i = self.model.get_binding_index(name)
+                            self.bindings[name].data.resize_(tuple(self.context.get_binding_shape(i)))
+
+                s = self.bindings["images"].shape
+                assert preprocessed_data.shape == s, f"input size {preprocessed_data.shape} {'>' if self.dynamic else 'not equal to'} max model size {s}"
+                self.binding_addrs["images"] = int(preprocessed_data.data_ptr())
+                self.context.execute_v2(list(self.binding_addrs.values()))
+                y = [self.bindings[x].data for x in sorted(self.output_names)]
+            finally:
+                    print("end")
         elif self.jt:
             if self.fp16:
                 preprocessed_data = preprocessed_data.half()
@@ -220,20 +318,6 @@ class SemanticSegmentation(InferenceEngine):
             import ipdb
             ipdb.set_trace()
             y = self.model.run(self.output_names, {self.model.get_inputs()[0].name: preprocessed_data})
-        elif self.trt:
-            if self.dynamic and preprocessed_data.shape != self.bindings["images"].shape:
-                i = self.model.get_binding_index("images")
-                self.context.set_binding_shape(i, preprocessed_data.shape)
-                self.bindings["images"] = self.bindings["images"]._replace(shape=preprocessed_data.shape)
-                for name in self.output_names:
-                    i = self.model.get_binding_index(name)
-                    self.bindings[name].data.resize_(tuple(self.context.get_binding_shape(i)))
-            s = self.bindings["images"].shape
-            assert preprocessed_data.shape == s, f"input size {preprocessed_data.shape} {'>' if self.dynamic else 'not equal to'} max model size {s}"
-            self.binding_addrs["images"] = int(preprocessed_data.data_ptr())
-            self.context.execute_v2(list(self.binding_addrs.values()))
-            y = [self.bindings[x].data for x in sorted(self.output_names)]
-            
         elif self.opvino:
             if self.fp16:
                 preprocessed_data = preprocessed_data.astype(np.float16)
@@ -276,48 +360,46 @@ class SemanticSegmentation(InferenceEngine):
         mask_rgb[np.all(mask_convert == 3, axis=0)] = colors[3]#[0, 204, 255]
         return mask_rgb
     def postprocess(self, inference_output: Any) -> Any:
-        """后处理:将预测结果转换为可视化的RGB图像
+        """后处理: 将预测结果转换为分割图像"""
+        # Resize to original input size
+        pred = F.interpolate(inference_output, 
+                            size=self.config.get("img_size"),
+                            mode='bilinear', 
+                            align_corners=True)
         
-        Args:
-            inference_output: 模型输出的预测结果
-            
-        Returns:
-            mask_rgb: 可视化的RGB分割图,shape为(H,W,3)
-        """
-        # 获取预测类别
-        preds = torch.nn.Softmax(dim=1)(inference_output).argmax(dim=1)
-        pred = preds[0].cpu().numpy()
+        # Get class predictions
+        pred = torch.argmax(pred, dim=1).squeeze(0).cpu().numpy()
         
-        # 转换为RGB掩码
+        # Convert to RGB mask
+        import seaborn as sns
+        palette = sns.color_palette("hls", self.config.get("num_classes"))
         h, w = pred.shape
         mask_rgb = np.zeros(shape=(h, w, 3), dtype=np.uint8)
-        pred = pred[np.newaxis, :, :]  # 添加通道维度 [1,H,W]
-        
-        # 获取类别名称和颜色映射
-        class_names = self.config.get("names", [])
-        import seaborn as sns
-        palette = sns.color_palette("hls", len(class_names))
         colors = []
-        for i in range(len(class_names)):
-            colors.append([
-                int(palette[i][2] * 255),  # R
-                int(palette[i][1] * 255),  # G
-                int(palette[i][0] * 255)   # B
-            ])
+        for i in range(self.config.get("num_classes")):
+            color = [int(palette[i][2] * 255), int(palette[i][1] * 255), int(palette[i][0] * 255)]
+            colors.append(color)
         
-        # 为每个类别赋予对应颜色
+        # Apply color map
         for i, color in enumerate(colors):
-            mask_rgb[np.all(pred == i, axis=0)] = color
-            
+            mask_rgb[pred == i] = color
+        
         return mask_rgb
-    
+
+
     def run(self, input_data: Any) -> Any:
+        # 完整的推理流程
         img, img_src = self.preprocess(input_data)
         pred = self.inference(img)
+        import ipdb
+        ipdb.set_trace()
         mask = self.postprocess(pred)
         
-        # Resize回原图大小
+        # Resize back to original image size
         if mask.shape[:2] != img_src.shape[:2]:
-            mask = cv2.resize(mask, (img_src.shape[1], img_src.shape[0]), interpolation=cv2.INTER_NEAREST)
-            
+            mask = cv2.resize(mask, 
+                             (img_src.shape[1], img_src.shape[0]), 
+                             interpolation=cv2.INTER_NEAREST)
+        
         return mask
+
