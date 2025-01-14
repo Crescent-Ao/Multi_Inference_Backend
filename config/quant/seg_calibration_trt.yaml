@@ -1,0 +1,24 @@
+# 路径配置
+paths:
+  tmp_base: "tmp/TensorRT"
+  # 最终模型输出路径
+  model_output: "weights"
+
+calibration:
+  task_type: "segmentation"
+  batch_size: 1
+  batch_num: 100
+  calib_img_dir: "/data/Datasets_Seg/Pond/train/image"
+  model_path: "/workspace/Multi_Inference_Backend/weights/unet/best.onnx"
+  platform: "TensorRT"
+  precision: "INT8"
+  qat: false
+  max_workspace_size: 8
+  input_size:
+    width: 1024
+    height: 1024
+  skip_layers: []
+
+
+
+
