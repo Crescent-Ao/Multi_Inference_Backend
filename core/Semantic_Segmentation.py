@@ -135,7 +135,68 @@ class SemanticSegmentation(InferenceEngine):
             output_names = [output.name for output in model.get_outputs()]
             
         elif trt:
-           pass
+            import tensorrt as trt  # noqa https://developer.nvidia.com/nvidia-tensorrt-download
+            check_version(trt.__version__, ">=7.0.0", hard=True)
+            check_version(trt.__version__, "!=10.1.0", msg="https://github.com/ultralytics/ultralytics/pull/14239")
+            if self.device.type == "cpu":
+                self.device = torch.device("cuda:0")
+            Binding = namedtuple("Binding", ("name", "dtype", "shape", "data", "ptr"))
+            logger = trt.Logger(trt.Logger.INFO)
+            trt.init_libnvinfer_plugins(logger, '')
+            # Read file
+            path = self.config.get("model_path")
+            with open(path, "rb") as f, trt.Runtime(logger) as runtime:
+                model = runtime.deserialize_cuda_engine(f.read())  # read engine
+                context = model.create_execution_context()
+            
+
+            bindings = OrderedDict()
+            output_names = []
+            fp16 = False  # default updated below
+            dynamic = False
+            is_trt10 = not hasattr(model, "num_bindings")
+            num = range(model.num_io_tensors) if is_trt10 else range(model.num_bindings)
+            from loguru import logger
+            for i in num:
+                if is_trt10:
+                    name = model.get_tensor_name(i)
+                    dtype = trt.nptype(model.get_tensor_dtype(name))
+                    is_input = model.get_tensor_mode(name) == trt.TensorIOMode.INPUT
+                    if is_input:
+                        if -1 in tuple(model.get_tensor_shape(name)):
+                            dynamic = True
+                            context.set_input_shape(name, tuple(model.get_tensor_profile_shape(name, 0)[1]))
+                        if dtype == np.float16:
+                            fp16 = True
+                    else:
+                        output_names.append(name)
+                    import ipdb
+                    ipdb.set_trace()
+                    shape = tuple(context.get_tensor_shape(name))
+                    logger.info(f"name: {name}, shape: {shape}")
+                else:  # TensorRT < 10.0
+                    name = model.get_binding_name(i)
+                    dtype = trt.nptype(model.get_binding_dtype(i))
+                    is_input = model.binding_is_input(i)
+                    if model.binding_is_input(i):
+                        if -1 in tuple(model.get_binding_shape(i)):  # dynamic
+                            dynamic = True
+                            context.set_binding_shape(i, tuple(model.get_profile_shape(0, i)[1]))
+                        if dtype == np.float16:
+                            fp16 = True
+                    else:
+                        output_names.append(name)
+                    shape = tuple(context.get_binding_shape(i))
+                im = torch.from_numpy(np.empty(shape, dtype=dtype)).to(self.device)
+                bindings[name] = Binding(name, dtype, shape, im, int(im.data_ptr()))
+            binding_addrs = OrderedDict((n, d.ptr) for n, d in bindings.items())
+            batch_size = bindings["images"].shape[0]  # if dynamic, this is inst
+            self.dynamic = False
+            self.context = context
+            self.model = model
+            self.bindings = bindings
+            self.output_names = output_names
+            self.binding_addrs = binding_addrs
 
             
            
@@ -218,71 +279,6 @@ class SemanticSegmentation(InferenceEngine):
             import ipdb
             ipdb.set_trace()
         elif self.trt:
-           
-            import tensorrt as trt  # noqa https://developer.nvidia.com/nvidia-tensorrt-download
-            check_version(trt.__version__, ">=7.0.0", hard=True)
-            check_version(trt.__version__, "!=10.1.0", msg="https://github.com/ultralytics/ultralytics/pull/14239")
-            if self.device.type == "cpu":
-                self.device = torch.device("cuda:0")
-            Binding = namedtuple("Binding", ("name", "dtype", "shape", "data", "ptr"))
-            logger = trt.Logger(trt.Logger.INFO)
-            trt.init_libnvinfer_plugins(logger, '')
-            # Read file
-            path = self.config.get("model_path")
-            with open(path, "rb") as f, trt.Runtime(logger) as runtime:
-                model = runtime.deserialize_cuda_engine(f.read())  # read engine
-                context = model.create_execution_context()
-            
-
-            bindings = OrderedDict()
-            output_names = []
-            fp16 = False  # default updated below
-            dynamic = False
-            is_trt10 = not hasattr(model, "num_bindings")
-            num = range(model.num_io_tensors) if is_trt10 else range(model.num_bindings)
-            from loguru import logger
-            for i in num:
-                if is_trt10:
-                    name = model.get_tensor_name(i)
-                    dtype = trt.nptype(model.get_tensor_dtype(name))
-                    is_input = model.get_tensor_mode(name) == trt.TensorIOMode.INPUT
-                    if is_input:
-                        if -1 in tuple(model.get_tensor_shape(name)):
-                            dynamic = True
-                            context.set_input_shape(name, tuple(model.get_tensor_profile_shape(name, 0)[1]))
-                        if dtype == np.float16:
-                            fp16 = True
-                    else:
-                        output_names.append(name)
-                    import ipdb
-                    ipdb.set_trace()
-                    shape = tuple(context.get_tensor_shape(name))
-                    logger.info(f"name: {name}, shape: {shape}")
-                else:  # TensorRT < 10.0
-                    name = model.get_binding_name(i)
-                    dtype = trt.nptype(model.get_binding_dtype(i))
-                    is_input = model.binding_is_input(i)
-                    if model.binding_is_input(i):
-                        if -1 in tuple(model.get_binding_shape(i)):  # dynamic
-                            dynamic = True
-                            context.set_binding_shape(i, tuple(model.get_profile_shape(0, i)[1]))
-                        if dtype == np.float16:
-                            fp16 = True
-                    else:
-                        output_names.append(name)
-                    shape = tuple(context.get_binding_shape(i))
-                im = torch.from_numpy(np.empty(shape, dtype=dtype)).to(self.device)
-                bindings[name] = Binding(name, dtype, shape, im, int(im.data_ptr()))
-            binding_addrs = OrderedDict((n, d.ptr) for n, d in bindings.items())
-            batch_size = bindings["images"].shape[0]  # if dynamic, this is inst
-            self.dynamic = False
-            self.context = context
-            self.model = model
-            self.bindings = bindings
-            self.output_names = output_names
-            self.binding_addrs = binding_addrs
-
-    
             try:
                 if self.dynamic and preprocessed_data.shape != self.bindings["images"].shape:
                     if self.is_trt10:
@@ -402,4 +398,3 @@ class SemanticSegmentation(InferenceEngine):
                              interpolation=cv2.INTER_NEAREST)
         
         return mask
-
