@@ -100,7 +100,7 @@ npm run dev
 ```
 
 # Roadmap
-- [ ] Support for Segmentation.
+- [x] Support for Segmentation. 20250114 Fix TensorRT <=10.0 Context bug error
 - [ ] Support Docker Image make.
 - [ ] Support FastAPI backend inference Service.
 - [ ] Support k8s deployment.
